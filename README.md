@@ -1,1 +1,1 @@
-# A LED Matrix driver for the RP2040
+# An LED Matrix driver for the RP2040
