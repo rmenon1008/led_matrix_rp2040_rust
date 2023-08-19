@@ -4,6 +4,53 @@ use embedded_hal::digital::v2::OutputPin;
 
 const WIDTH: usize = 96;
 const HEIGHT: usize = 48;
+const HALF_HEIGHT: usize = HEIGHT / 2;
+const DELAY_TABLE: [u32; 11] = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024];
+const GAMMA_RED_TABLE: [u16; 256] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 4, 4, 5,
+    5, 5, 6, 6, 7, 8, 8, 9, 10, 10, 11, 12, 13, 13, 14, 15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 27,
+    28, 29, 31, 32, 34, 36, 37, 39, 41, 42, 44, 46, 48, 50, 52, 54, 57, 59, 61, 64, 66, 68, 71, 74,
+    76, 79, 82, 85, 88, 91, 94, 97, 100, 103, 106, 110, 113, 117, 120, 124, 128, 132, 136, 140,
+    144, 148, 152, 156, 161, 165, 169, 174, 179, 183, 188, 193, 198, 203, 208, 214, 219, 225, 230,
+    236, 241, 247, 253, 259, 265, 271, 277, 284, 290, 297, 303, 310, 317, 324, 331, 338, 345, 352,
+    360, 367, 375, 382, 390, 398, 406, 414, 423, 431, 439, 448, 457, 465, 474, 483, 492, 501, 511,
+    520, 530, 539, 549, 559, 569, 579, 589, 600, 610, 621, 632, 642, 653, 664, 676, 687, 698, 710,
+    722, 734, 745, 758, 770, 782, 795, 807, 820, 833, 846, 859, 872, 885, 899, 913, 926, 940, 954,
+    969, 983, 997, 1012, 1027, 1042, 1057, 1072, 1087, 1102, 1118, 1134, 1150, 1166, 1182, 1198,
+    1215, 1231, 1248, 1265, 1282, 1299, 1317, 1334, 1352, 1370, 1388, 1406, 1424, 1442, 1461, 1480,
+    1499, 1518, 1537, 1556, 1576, 1595, 1615, 1635, 1655, 1676, 1696, 1717, 1738, 1759, 1780, 1801,
+    1823, 1844, 1866, 1888, 1910, 1933, 1955, 1978, 2001, 2024, 2047,
+];
+const GAMMA_GREEN_TABLE: [u16; 256] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 3, 3, 4, 4, 4, 5, 6, 6, 7, 7, 8, 9, 10,
+    11, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 23, 24, 25, 27, 28, 30, 31, 33, 35, 37, 38, 40, 42,
+    44, 46, 48, 51, 53, 55, 57, 60, 62, 65, 67, 70, 72, 75, 78, 81, 84, 87, 90, 93, 96, 99, 103,
+    106, 109, 113, 116, 120, 124, 127, 131, 135, 139, 143, 147, 151, 156, 160, 164, 169, 173, 178,
+    183, 187, 192, 197, 202, 207, 212, 217, 223, 228, 233, 239, 245, 250, 256, 262, 268, 274, 280,
+    286, 292, 298, 305, 311, 317, 324, 331, 338, 344, 351, 358, 365, 373, 380, 387, 395, 402, 410,
+    417, 425, 433, 441, 449, 457, 465, 474, 482, 491, 499, 508, 516, 525, 534, 543, 552, 562, 571,
+    580, 590, 599, 609, 619, 628, 638, 648, 658, 669, 679, 689, 700, 710, 721, 732, 743, 754, 765,
+    776, 787, 799, 810, 822, 833, 845, 857, 869, 881, 893, 905, 918, 930, 943, 955, 968, 981, 994,
+    1007, 1020, 1033, 1047, 1060, 1074, 1088, 1101, 1115, 1129, 1143, 1157, 1172, 1186, 1201, 1215,
+    1230, 1245, 1260, 1275, 1290, 1305, 1321, 1336, 1352, 1367, 1383, 1399, 1415, 1431, 1448, 1464,
+    1480, 1497, 1514, 1530, 1547, 1564, 1582, 1599, 1616, 1634, 1651, 1669, 1687, 1705, 1723, 1741,
+    1759, 1778, 1796, 1815, 1833, 1852, 1871, 1890, 1909, 1929, 1948, 1968, 1987, 2007, 2027, 2047,
+];
+const GAMMA_BLUE_TABLE: [u16; 256] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 3, 3, 4, 4, 4, 5, 6, 6, 7, 7, 8, 9, 10,
+    11, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 23, 24, 25, 27, 28, 30, 31, 33, 35, 37, 38, 40, 42,
+    44, 46, 48, 51, 53, 55, 57, 60, 62, 65, 67, 70, 72, 75, 78, 81, 84, 87, 90, 93, 96, 99, 103,
+    106, 109, 113, 116, 120, 124, 127, 131, 135, 139, 143, 147, 151, 156, 160, 164, 169, 173, 178,
+    183, 187, 192, 197, 202, 207, 212, 217, 223, 228, 233, 239, 245, 250, 256, 262, 268, 274, 280,
+    286, 292, 298, 305, 311, 317, 324, 331, 338, 344, 351, 358, 365, 373, 380, 387, 395, 402, 410,
+    417, 425, 433, 441, 449, 457, 465, 474, 482, 491, 499, 508, 516, 525, 534, 543, 552, 562, 571,
+    580, 590, 599, 609, 619, 628, 638, 648, 658, 669, 679, 689, 700, 710, 721, 732, 743, 754, 765,
+    776, 787, 799, 810, 822, 833, 845, 857, 869, 881, 893, 905, 918, 930, 943, 955, 968, 981, 994,
+    1007, 1020, 1033, 1047, 1060, 1074, 1088, 1101, 1115, 1129, 1143, 1157, 1172, 1186, 1201, 1215,
+    1230, 1245, 1260, 1275, 1290, 1305, 1321, 1336, 1352, 1367, 1383, 1399, 1415, 1431, 1448, 1464,
+    1480, 1497, 1514, 1530, 1547, 1564, 1582, 1599, 1616, 1634, 1651, 1669, 1687, 1705, 1723, 1741,
+    1759, 1778, 1796, 1815, 1833, 1852, 1871, 1890, 1909, 1929, 1948, 1968, 1987, 2007, 2027, 2047,
+];
 
 #[derive(Debug)]
 pub struct Error;
@@ -277,26 +324,25 @@ impl<
     }
 
     fn get_data_bits(&mut self, row: usize, col: usize, depth_level: u8) -> u8 {
-        let mut data = 0;
+        let base_index = 3 * (row * WIDTH + col);
+        let base_index_bottom = 3 * ((row + HALF_HEIGHT) * WIDTH + col);
 
-        let r0 = (self.current_frame[3 * (row * WIDTH + col) + 0] >> depth_level) & 0x01;
-        let g0 = (self.current_frame[3 * (row * WIDTH + col) + 1] >> depth_level) & 0x01;
-        let b0 = (self.current_frame[3 * (row * WIDTH + col) + 2] >> depth_level) & 0x01;
-        let r1 =
-            (self.current_frame[3 * ((row + HEIGHT / 2) * WIDTH + col) + 0] >> depth_level) & 0x01;
-        let g1 =
-            (self.current_frame[3 * ((row + HEIGHT / 2) * WIDTH + col) + 1] >> depth_level) & 0x01;
-        let b1 =
-            (self.current_frame[3 * ((row + HEIGHT / 2) * WIDTH + col) + 2] >> depth_level) & 0x01;
+        let r0 = ((GAMMA_RED_TABLE[self.current_frame[base_index] as usize] >> depth_level) & 0x01)
+            as u8;
+        let g0 = ((GAMMA_GREEN_TABLE[self.current_frame[base_index + 1] as usize] >> depth_level)
+            & 0x01) as u8;
+        let b0 = ((GAMMA_BLUE_TABLE[self.current_frame[base_index + 2] as usize] >> depth_level)
+            & 0x01) as u8;
+        let r1 = ((GAMMA_RED_TABLE[self.current_frame[base_index_bottom] as usize] >> depth_level)
+            & 0x01) as u8;
+        let g1 = ((GAMMA_GREEN_TABLE[self.current_frame[base_index_bottom + 1] as usize]
+            >> depth_level)
+            & 0x01) as u8;
+        let b1 = ((GAMMA_BLUE_TABLE[self.current_frame[base_index_bottom + 2] as usize]
+            >> depth_level)
+            & 0x01) as u8;
 
-        data |= r0 << 0;
-        data |= g0 << 1;
-        data |= b0 << 2;
-        data |= r1 << 3;
-        data |= g1 << 4;
-        data |= b1 << 5;
-
-        data
+        r0 << 0 | g0 << 1 | b0 << 2 | r1 << 3 | g1 << 4 | b1 << 5
     }
 
     pub fn render(&mut self) {
@@ -306,25 +352,9 @@ impl<
         }
 
         for row in 0..HEIGHT / 2 {
-            for depth in 0..8 {
+            for depth in 0..11 {
                 for col in 0..WIDTH {
-                    // let r0 = self.current_frame[3 * (row * WIDTH + col) + 0] > 0;
-                    // let g0 = self.current_frame[3 * (row * WIDTH + col) + 1] > 0;
-                    // let b0 = self.current_frame[3 * (row * WIDTH + col) + 2] > 0;
-                    // let r1 = self.current_frame[3 * ((row + HEIGHT / 2) * WIDTH + col) + 0] > 0;
-                    // let g1 = self.current_frame[3 * ((row + HEIGHT / 2) * WIDTH + col) + 1] > 0;
-                    // let b1 = self.current_frame[3 * ((row + HEIGHT / 2) * WIDTH + col) + 2] > 0;
-
-                    // // Append these into a single byte
-                    // let mut data = 0u8;
-                    // data |= (r0 as u8) << 0;
-                    // data |= (g0 as u8) << 1;
-                    // data |= (b0 as u8) << 2;
-                    // data |= (r1 as u8) << 3;
-                    // data |= (g1 as u8) << 4;
-                    // data |= (b1 as u8) << 5;
-
-                    //
+                    // Get the data from the current frame
                     let data = self.get_data_bits(row, col, depth);
 
                     // Set the data
@@ -332,23 +362,21 @@ impl<
 
                     // Pulse the clock
                     self.clock_pin.set_clock(true).unwrap();
-                    asm::delay(1);
+                    asm::delay(0);
                     self.clock_pin.set_clock(false).unwrap();
                 }
-                // // Disable the output
-                // self.output_enable_pin.set_output_enable(true).unwrap();
 
                 // Set the address
                 self.addr_pins.set_addr_bits((row) as u8).unwrap();
 
                 // Pulse the latch
                 self.latch_pin.set_latch(true).unwrap();
-                asm::delay(1);
+                asm::delay(0);
                 self.latch_pin.set_latch(false).unwrap();
 
                 // Enable the output
                 self.output_enable_pin.set_output_enable(false).unwrap();
-                asm::delay(2u32.pow(depth as u32) * 100);
+                asm::delay(DELAY_TABLE[depth as usize] * 4);
                 self.output_enable_pin.set_output_enable(true).unwrap();
             }
         }
