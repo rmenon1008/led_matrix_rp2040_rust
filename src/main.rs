@@ -1,59 +1,48 @@
-//! Blinks the LED on a Pico board
-//!
-//! This will blink an LED attached to GP25, which is the pin the Pico uses for the on-board LED.
 #![no_std]
 #![no_main]
 
-use bsp::hal::multicore::{Multicore, Stack};
-use bsp::hal::pac::interrupt;
-use bsp::{entry, hal::clocks::StoppableClock};
+use bsp::entry;
+use bsp::hal;
+use bsp::hal::pac;
+use bsp::hal::{clocks::StoppableClock, gpio::FunctionSpi};
 use defmt::*;
 use defmt_rtt as _;
-use embedded_hal::digital::v2::{OutputPin, ToggleableOutputPin};
+use embedded_hal::adc::OneShot;
+use embedded_hal::spi::FullDuplex;
 use fugit::RateExtU32;
 use panic_probe as _;
 use rp_pico as bsp;
-
-use usb_device::{class_prelude::*, prelude::*};
-use usbd_serial::{SerialPort, USB_CLASS_CDC};
-
-static mut CORE1_STACK: Stack<4096> = Stack::new();
-static mut USB_DEVICE: Option<UsbDevice<bsp::hal::usb::UsbBus>> = None;
-static mut USB_BUS: Option<UsbBusAllocator<bsp::hal::usb::UsbBus>> = None;
-static mut USB_SERIAL: Option<SerialPort<bsp::hal::usb::UsbBus>> = None;
-
 mod rgb_matrix;
 
-use bsp::hal::{clocks::Clock, pac, sio::Sio, watchdog::Watchdog};
-
+static mut CORE1_STACK: hal::multicore::Stack<4096> = hal::multicore::Stack::new();
 static mut LED_FRAME: [u8; 96 * 48 * 3] = [0u8; 96 * 48 * 3];
 static mut CURRENT_POSITION: usize = 0;
+static BRIGHTNESS_EXP_ALPHA: f32 = 0.995;
 
 #[entry]
 fn main() -> ! {
-    info!("Program start");
     let mut pac = pac::Peripherals::take().unwrap();
-    let core = pac::CorePeripherals::take().unwrap();
-    let mut watchdog = Watchdog::new(pac.WATCHDOG);
-    let mut sio = Sio::new(pac.SIO);
+    let _core = pac::CorePeripherals::take().unwrap();
+    let mut watchdog = hal::Watchdog::new(pac.WATCHDOG);
+    let mut sio = hal::sio::Sio::new(pac.SIO);
 
     // Step 1. Set up clocks. We're doing this manually here, because we're overclocking it.
     // This is to reduce the flicker on the matrix.
 
     // Set up the system clock to use the external oscillator, running at 12 MHz.
-    let xosc = bsp::hal::xosc::setup_xosc_blocking(pac.XOSC, bsp::XOSC_CRYSTAL_FREQ.Hz())
+    let xosc = hal::xosc::setup_xosc_blocking(pac.XOSC, bsp::XOSC_CRYSTAL_FREQ.Hz())
         .map_err(|_x| false)
         .unwrap();
 
     // Set up the watchdog to generate a tick every 1 us.
-    watchdog.enable_tick_generation((rp_pico::XOSC_CRYSTAL_FREQ / 1_000_000) as u8);
+    watchdog.enable_tick_generation((bsp::XOSC_CRYSTAL_FREQ / 1_000_000) as u8);
 
     // Set up the clock manager.
-    let mut clocks = bsp::hal::clocks::ClocksManager::new(pac.CLOCKS);
-    let pll_sys = bsp::hal::pll::setup_pll_blocking(
+    let mut clocks = hal::clocks::ClocksManager::new(pac.CLOCKS);
+    let pll_sys = hal::pll::setup_pll_blocking(
         pac.PLL_SYS,
         xosc.operating_frequency(),
-        bsp::hal::pll::PLLConfig {
+        hal::pll::PLLConfig {
             vco_freq: 1512.MHz(),
             refdiv: 1,
             post_div1: 5,
@@ -66,10 +55,10 @@ fn main() -> ! {
     .unwrap();
 
     // Set up the USB clock.
-    let pll_usb = bsp::hal::pll::setup_pll_blocking(
+    let pll_usb = hal::pll::setup_pll_blocking(
         pac.PLL_USB,
         xosc.operating_frequency(),
-        bsp::hal::pll::common_configs::PLL_USB_48MHZ,
+        hal::pll::common_configs::PLL_USB_48MHZ,
         &mut clocks,
         &mut pac.RESETS,
     )
@@ -86,10 +75,9 @@ fn main() -> ! {
     clocks.gpio_output1_clock.disable();
     clocks.gpio_output2_clock.disable();
     clocks.gpio_output3_clock.disable();
-    clocks.adc_clock.disable();
     clocks.rtc_clock.disable();
 
-    // Step 2. Set up the peripherals.
+    // Set up the peripherals.
     let pins = bsp::Pins::new(
         pac.IO_BANK0,
         pac.PADS_BANK0,
@@ -97,6 +85,7 @@ fn main() -> ! {
         &mut pac.RESETS,
     );
 
+    // Set up the RGB matrix.
     let rgb_r0 = pins.gpio0.into_push_pull_output();
     let rgb_g0 = pins.gpio1.into_push_pull_output();
     let rgb_b0 = pins.gpio2.into_push_pull_output();
@@ -123,81 +112,76 @@ fn main() -> ! {
     let mut matrix =
         rgb_matrix::RgbMatrix96x48::new(rgb_pins, addr_pins, latch, clock, output_enable);
 
-    let mut mc = Multicore::new(&mut pac.PSM, &mut pac.PPB, &mut sio.fifo);
+    // Set up the second core to read the SPI data and write it to the buffer.
+    let mut mc = hal::multicore::Multicore::new(&mut pac.PSM, &mut pac.PPB, &mut sio.fifo);
     let cores = mc.cores();
     let core1 = &mut cores[1];
     core1
         .spawn(unsafe { &mut CORE1_STACK.mem }, move || {
-            // Set up the USB driver
-            let usb_bus = UsbBusAllocator::new(bsp::hal::usb::UsbBus::new(
-                pac.USBCTRL_REGS,
-                pac.USBCTRL_DPRAM,
-                clocks.usb_clock,
-                true,
-                &mut pac.RESETS,
-            ));
-            unsafe {
-                USB_BUS = Some(usb_bus);
+            let mut pac = unsafe { pac::Peripherals::steal() };
+
+            // Set up the SPI driver
+            let _spi_mosi = pins.gpio19.into_mode::<FunctionSpi>();
+            let _spi_miso = pins.gpio16.into_mode::<FunctionSpi>();
+            let _spi_sck = pins.gpio18.into_mode::<FunctionSpi>();
+            let spi = hal::spi::Spi::<_, _, 8>::new(pac.SPI0);
+
+            let mut spi = spi.init_slave(&mut pac.RESETS, &embedded_hal::spi::MODE_3);
+
+            loop {
+                if let Ok(value) = spi.read() {
+                    unsafe {
+                        LED_FRAME[CURRENT_POSITION] = value;
+                        CURRENT_POSITION += 1;
+                        if CURRENT_POSITION >= 96 * 48 * 3 {
+                            CURRENT_POSITION = 0;
+                        }
+                    }
+                }
             }
-            let bus_ref = unsafe { USB_BUS.as_ref().unwrap() };
-
-            // Set up the USB Communications Class Device driver
-            let serial = SerialPort::new(bus_ref);
-            unsafe {
-                USB_SERIAL = Some(serial);
-            }
-
-            let usb_dev = UsbDeviceBuilder::new(bus_ref, UsbVidPid(0x16c0, 0x27dd))
-                .manufacturer("Rohan Menon")
-                .product("Serial port")
-                .serial_number("_led_matrix_")
-                .device_class(USB_CLASS_CDC) // from: https://www.usb.org/defined-class-codes
-                .build();
-            unsafe {
-                USB_DEVICE = Some(usb_dev);
-            }
-
-            unsafe {
-                pac::NVIC::unmask(bsp::hal::pac::Interrupt::USBCTRL_IRQ);
-            };
-
-            loop {}
         })
         .unwrap();
 
+    // Set up the ADC and the brightness sensor.
+    let mut adc = hal::Adc::new(pac.ADC, &mut pac.RESETS);
+    let mut brightness_sensor_adc = pins.gpio28.into_floating_input();
+
+    // Keep track of the brightness with an exponential moving average
+    let mut brightness: f32 = 1600.0;
     loop {
         unsafe {
             matrix.set_next_frame(&LED_FRAME);
         }
-        matrix.render();
+
+        // // Read the brightness sensor and store the value in the array
+        let brightness_sensor_value: u16 = adc.read(&mut brightness_sensor_adc).unwrap();
+
+        // // Update the brightness
+        brightness = BRIGHTNESS_EXP_ALPHA * brightness
+            + (1.0 - BRIGHTNESS_EXP_ALPHA) * brightness_sensor_value as f32;
+
+        // Render the matrix
+        matrix.render(brightness_n(brightness as u16));
     }
 }
 
-#[interrupt]
-unsafe fn USBCTRL_IRQ() {
-    // use core::sync::atomic::{AtomicBool, Ordering};
-
-    // Grab the global objects. This is OK as we only access them under interrupt.
-    let usb_dev = USB_DEVICE.as_mut().unwrap();
-    let serial = USB_SERIAL.as_mut().unwrap();
-
-    // Poll the USB driver with all of our supported USB Classes
-    if usb_dev.poll(&mut [serial]) {
-        let mut buf = [0u8; 64];
-        match serial.read(&mut buf) {
-            Err(_e) => {}
-            Ok(0) => {}
-            Ok(count) => {
-                for i in 0..count {
-                    LED_FRAME[CURRENT_POSITION] = buf[i];
-                    CURRENT_POSITION += 1;
-                }
-
-                if CURRENT_POSITION >= 96 * 48 * 3 {
-                    CURRENT_POSITION = 0;
-                }
-            }
-        }
+fn brightness_n(adc: u16) -> u8 {
+    if adc < 150 {
+        0
+    } else if adc < 300 {
+        1
+    } else if adc < 600 {
+        2
+    } else if adc < 800 {
+        3
+    } else if adc < 1100 {
+        4
+    } else if adc < 1500 {
+        5
+    } else if adc < 2000 {
+        6
+    } else {
+        7
     }
 }
 
