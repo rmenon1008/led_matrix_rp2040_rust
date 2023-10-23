@@ -97,9 +97,9 @@ fn main() -> ! {
     let addr_b = pins.gpio7.into_push_pull_output();
     let addr_c = pins.gpio8.into_push_pull_output();
     let addr_d = pins.gpio9.into_push_pull_output();
-    let addr_e = pins.gpio14.into_push_pull_output();
+    let addr_e = pins.gpio10.into_push_pull_output();
 
-    let clock = pins.gpio10.into_push_pull_output();
+    let clock = pins.gpio11.into_push_pull_output();
     let latch = pins.gpio12.into_push_pull_output();
     let output_enable = pins.gpio13.into_push_pull_output();
 
