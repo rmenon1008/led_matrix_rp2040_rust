@@ -166,19 +166,17 @@ fn main() -> ! {
 }
 
 fn brightness_n(adc: u16) -> u8 {
-    if adc < 150 {
-        0
-    } else if adc < 300 {
+    if adc < 50 {
         1
-    } else if adc < 600 {
+    } else if adc < 100 {
         2
-    } else if adc < 800 {
+    } else if adc < 200 {
         3
-    } else if adc < 1100 {
+    } else if adc < 400 {
         4
-    } else if adc < 1500 {
+    } else if adc < 700 {
         5
-    } else if adc < 2000 {
+    } else if adc < 1200 {
         6
     } else {
         7
